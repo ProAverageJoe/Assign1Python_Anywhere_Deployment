@@ -122,11 +122,8 @@ def author_delete(request, pk):
 
 def book_delete(request, pk):
     book = get_object_or_404(Book, pk=pk)
-    try:
-        book.delete()
-        messages.success(request, (book.title + " has been deleted."))
-    except:
-        messages.success(request, (book.title + " cannot be deleted. This book loaned out."))
+    book.delete()
+    messages.success(request, (book.title + " has been deleted."))
     return redirect('book_list')
 
 class AvailBooksListView(generic.ListView):
