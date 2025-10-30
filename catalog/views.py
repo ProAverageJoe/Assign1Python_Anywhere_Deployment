@@ -1,162 +1,217 @@
-from django.contrib.auth.mixins import LoginRequiredMixin
-from .models import Book, Author, BookInstance, Genre
-from django.shortcuts import render, get_object_or_404
-from django.views.generic.edit import CreateView, UpdateView
-from django.contrib import messages
-from django.shortcuts import redirect
-from django.http import HttpResponseRedirect
+from django.shortcuts import render
+import calendar
+from datetime import date, datetime, timedelta
 from django.urls import reverse
-from .forms import LoanBookForm
-import datetime
+from django.utils import timezone
+from django.http import HttpResponseBadRequest, HttpResponseForbidden
+from .forms import EventBookingForm
+from .models import Event, EventPlanner, Room, VALID_HOURS
+from django.views import View, generic
+from django.db.models import Count
+from django.contrib.auth.mixins import LoginRequiredMixin
+from django.contrib.auth.decorators import user_passes_test
+from django.utils.decorators import method_decorator
+from django.shortcuts import get_object_or_404, redirect
+from django.utils.timezone import make_aware
+from django.contrib import messages
+from django.contrib.auth import login
+
+SLOTS_PER_DAY = 6
+
+# Create your views here.
+
+def _month_grid(year: int, month: int, capacity_aware: bool = True):
+
+    cal = calendar.Calendar(firstweekday=6)
+    weeks = cal.monthdatescalendar(year, month)
+
+    month_start = date(year, month, 1)
+    last_day = calendar.monthrange(year, month)[1]
+    month_end = date(year, month, last_day)
+
+    visible_days_start = weeks[0][0]
+    visible_days_end = weeks[-1][-1]
+
+    counts_qs = (
+        Event.objects
+        .filter(date__range=(visible_days_start, visible_days_end))
+        .values('date')
+        .annotate(count=Count('id'))
+    )
+
+    by_day = {row['date']: row['count'] for row in counts_qs}
+
+    rooms_total = Room.objects.filter(status='a').count() or 1
+    slots_total = rooms_total * 6
+
+    def load_class(n: int) -> str:
+        if not capacity_aware:
+            if n == 0: return "load-0"
+            if n <= 2: return "load-1"
+            if n <= 4: return "load-2"
+            return "load-3"
+        ratio = n / slots_total
+        if ratio == 0: return "load-0"
+        if ratio <= 0.33: return "load-1"
+        if ratio <= 0.66: return "load-2"
+        return "load-3"
+
+    grid = []
+    for week in weeks:
+        row = []
+        for d in week:
+            count = by_day.get(d, 0)
+            row.append({
+                "date": d,
+                "in_month": (d.month == month),
+                "count": count,
+                "cls": load_class(count),
+                "url": reverse("catalog:calendar-day", args=[d.year, d.month, d.day]),
+            })
+        grid.append(row)
+
+    return {
+        "year": year,
+        "month": month,
+        "name": calendar.month_name[month],
+        "weeks": grid,
+        "rooms_total": rooms_total,
+        "slots_total": slots_total,
+    }
 
 def index(request):
-    """View function for home page of site."""
-    num_books = Book.objects.all().count()
-    num_instances = BookInstance.objects.all().count()
+    now = timezone.localtime()
+    cy, cm = now.year, now.month
+    ny, nm = (cy + 1, 1) if cm == 12 else (cy, cm + 1)
 
-    # Available books (status = 'a')
-    num_instances_available = BookInstance.objects.filter(status__exact='a').count()
+    current_month = _month_grid(cy, cm, capacity_aware=True)
+    next_month    = _month_grid(ny, nm, capacity_aware=True)
 
-    # The 'all()' is implied by default.
-    num_authors = Author.objects.count()
+    current_events = (
+        Event.objects
+        .filter(date__range=(date(cy, cm, 1), date(cy, cm, calendar.monthrange(cy, cm)[1])))
+        .order_by('date', 'time')[:4]
+    )
+    upcoming_events = (
+        Event.objects
+        .filter(date__gt=date(cy, cm, calendar.monthrange(cy, cm)[1]))
+        .order_by('date', 'time')[:4]
+    )
 
-    # Number of visits to this view, as counted in the session variable.
-    num_visits = request.session.get('num_visits', 0)
-    request.session['num_visits'] = num_visits + 1
+    return render(request, "catalog/index.html", {
+        "current_month": current_month,
+        "next_month": next_month,
+        "current_events": current_events,
+        "upcoming_events": upcoming_events,
+    })
+class DayView(View):
+    def get(self, request, year, month, day):
+        d = date(int(year), int(month), int(day))
+        rooms = list(Room.objects.order_by('name'))
 
-    context = {
-        'num_books': num_books,
-        'num_instances': num_instances,
-        'num_instances_available': num_instances_available,
-        'num_authors': num_authors,
-        'num_visits': num_visits,
-    }
-    # Render the HTML template index.html with the data in the context variable
-    return render(request, 'catalog/index.html', context=context)
+        events = (
+            Event.objects
+            .filter(date=d)
+            .select_related('room', 'planner')
+        )
 
-from django.views import generic
+        by_key = {(e.room.id, e.time.hour): e for e in events}
 
-class BookListView(LoginRequiredMixin, generic.ListView):
-    model = Book
+        rows = []
+        for h in VALID_HOURS:
+            cells = []
+            for r in rooms:
+                e = by_key.get((r.id, h))
 
-class BookDetailView(LoginRequiredMixin, generic.DetailView):
-    model = Book
+                book_url = (
+                    f"{reverse('catalog:book')}"
+                    f"?room={r.id}"
+                    f"&date={d:%Y-%m-%d}"
+                    f"&time={h:02d}:00"
+                )
 
-class AuthorListView(LoginRequiredMixin, generic.ListView):
-    model = Author
+                cells.append({
+                    "room_name": r.name,
+                    "room_id": str(r.id),
+                    "event": e,
+                    "booked": e is not None,
+                    "book_url": book_url,
+                })
 
-class AuthorDetailView(LoginRequiredMixin, generic.DetailView):
-    model = Author
+            rows.append({
+                "hour": h,
+                "cells": cells,
+            })
 
+        return render(
+            request,
+            "day.html",
+            {
+                "date": d,
+                "rooms": rooms,
+                "rows": rows,
+            }
+        )
 
-class LoanedBooksByUserListView(LoginRequiredMixin, generic.ListView):
-    """Generic class-based view listing books on loan to current user."""
-    model = BookInstance
-    template_name = 'catalog/my_books.html'
-    paginate_by = 10
+def find_best_room(date, time, expected_attendees):
+    booked_room_ids = Event.objects.filter(date=date, time=time).values_list('room_id', flat=True)
+    available_rooms = Room.objects.filter(status='a').exclude(id__in=booked_room_ids)
+    suitable_rooms = available_rooms.filter(capacity__gte=expected_attendees).order_by('capacity')
+    return suitable_rooms.first()
+@user_passes_test(lambda u: u.is_superuser)
+def book_event(request):
+    room_id = request.GET.get("room")
+    date_str = request.GET.get("date")
+    time_str = request.GET.get("time")
 
-    def get_queryset(self):
-        return BookInstance.objects.filter \
-            (borrower=self.request.user).filter(status__exact='o').order_by('due_back')
+    if not room_id:
+        return HttpResponseBadRequest("Missing room ID.")
 
-class AuthorCreate(CreateView):
-    model = Author
-    fields = ['first_name', 'last_name', 'date_of_birth', 'date_of_death', 'author_image']
+    room = get_object_or_404(Room, id=room_id)
+    event_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+    start_time = datetime.strptime(time_str, "%H:%M").time()
 
-    def form_valid(self, form):
-        post = form.save(commit=False)
-        post.save()
-        return HttpResponseRedirect(reverse('author_list'))
-
-class BookCreate(CreateView):
-    model = Book
-    fields = ['title', 'author', 'summary', 'isbn', 'genre', 'book_image']
-
-    def form_valid(self, form):
-        post = form.save(commit=False)
-        post.save()
-        # for all genres selected - add the genre many-to-many record
-        for genre in form.cleaned_data['genre']:
-            # get the matching genre record from the database
-            theGenre = get_object_or_404(Genre, name=genre)
-            post.genre.add(theGenre)
-            post.save()
-        return HttpResponseRedirect(reverse('book_list'))
-
-class AuthorUpdate(UpdateView):
-    model = Author
-    fields = ['first_name', 'last_name', 'date_of_birth', 'date_of_death', 'author_image']
-
-    def form_valid(self, form):
-        post = form.save(commit=False)
-        post.save()
-        return HttpResponseRedirect(reverse('author_list'))
-
-class BookUpdate(UpdateView):
-    model = Book
-    fields = ['title', 'author', 'summary', 'isbn', 'genre', 'book_image']
-
-    def form_valid(self, form):
-        post = form.save(commit=False)
-        # delete the previously stored genres for the book
-        for genre in post.genre.all():
-            post.genre.remove(genre)
-        # for all genres selected on the form - add the genre many-to-many genre record
-        for genre in form.cleaned_data['genre']:
-            # get the genre record matching the name in 'genre' from the Genre table
-            theGenre = get_object_or_404(Genre, name=genre)
-            post.genre.add(theGenre)
-
-        post.save()
-        return HttpResponseRedirect(reverse('book_list'))
-
-
-def author_delete(request, pk):
-    author = get_object_or_404(Author, pk=pk)
-    try:
-        author.delete()
-        messages.success(request, (author.first_name + " " + author.last_name + " has been deleted."))
-    except:
-        messages.success(request, (author.first_name + " " + author.last_name + " cannot be deleted. Books exist for this author."))
-    return redirect('author_list')
-
-def book_delete(request, pk):
-    book = get_object_or_404(Book, pk=pk)
-    book.delete()
-    messages.success(request, (book.title + " has been deleted."))
-    return redirect('book_list')
-
-class AvailBooksListView(generic.ListView):
-    model = BookInstance
-    template_name = 'catalog/bookinstance_list_available.html'
-    paginate_by = 10
-
-    def get_queryset(self):
-        return BookInstance.objects.filter(status__exact='a').order_by('book__title')
-
-def loan_book_librarian(request, pk):
-    """View function for renewing a specific BookInstance by librarian."""
-    book_instance = get_object_or_404(BookInstance, pk=pk)
-
-    # If this is a POST request then process the Form data
-    if request.method == 'POST':
-
-        # Create a form instance and populate it with data from the request (binding):
-        form = LoanBookForm(request.POST, instance=book_instance)
-
-        # Check if the form is valid:
+    if request.method == "POST":
+        form = EventBookingForm(request.POST)
         if form.is_valid():
-            # process the data in form.cleaned_data as required (set due date and update status of book)
-            book_instance = form.save()
-            book_instance.due_back = datetime.date.today() + datetime.timedelta(weeks=4)
-            book_instance.status = 'o'
-            book_instance.save()
+            event = form.save(commit=False)
+            event.date = event_date
+            event.time = start_time
 
-            # redirect to a new URL:
-            return HttpResponseRedirect(reverse('all_available'))
-    # If this is a GET (or any other method) create the default form
+            expected_attendees = form.cleaned_data["expected_attendees"]
+
+            if room.is_available(event_date, start_time) and room.capacity >= expected_attendees:
+                event.room = room
+            else:
+                best_room = find_best_room(event_date, start_time, expected_attendees)
+                if best_room:
+                    event.room = best_room
+                    messages.info(request, f"{room.name} was full — assigned {best_room.name} instead.")
+                else:
+                    messages.error(request, "No available rooms fit that group size at this time.")
+                    return redirect("catalog:calendar-day", year=event_date.year, month=event_date.month, day=event_date.day)
+
+            event.max_attendees = expected_attendees
+            event.save()
+
+            messages.success(request, f"Event booked in {event.room.name}!")
+            return redirect("catalog:calendar-day", year=event_date.year, month=event_date.month, day=event_date.day)
     else:
-        form = LoanBookForm(instance=book_instance,
-                    initial={'book_title':book_instance.book.title})
+        form = EventBookingForm()
 
-    return render(request, 'catalog/loan_book_librarian.html', {'form': form})
+    return render(
+        request,
+        "book_event.html",
+        {"form": form, "room": room, "date": event_date, "time": start_time},
+    )
+
+
+
+class EventPlannerListView( generic.ListView):
+    model = EventPlanner
+class EventPlannerDetailView( generic.DetailView):
+    model = EventPlanner
+class EventListView( generic.ListView):
+    model = Event
+class EventDetailView( generic.DetailView):
+    model = Event

@@ -1,90 +1,93 @@
-from django.contrib.auth.models import User
-from datetime import date
+from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
-from django.urls import reverse  # Used to generate URLs by reversing the URL patterns
-import uuid  # Required for unique book instances
+from django.urls import reverse
+import uuid #for unique room and event instances
+from django.utils import timezone
+from django.core.exceptions import ValidationError
+from datetime import time, timedelta
+from django.db.models import Q
+from django.contrib.auth.models import User
 
+
+VALID_HOURS = (10, 12, 14, 16, 18, 20)
+SLOT_DURATION = 2
+LAST_END_HOUR = 22
 
 class Genre(models.Model):
-    """Model representing a book genre."""
-    name = models.CharField(max_length=200, help_text='Enter a book genre (e.g. Science Fiction)')
-
+    name = models.CharField(max_length=100, help_text='Enter type of event (e.g. Speech, Birthday, Club Meeting)')
     def __str__(self):
-        """String for representing the Model object."""
         return self.name
 
-
-class Author(models.Model):
-    """Model representing an author."""
-    first_name = models.CharField(max_length=100)
-    last_name = models.CharField(max_length=100)
-    date_of_birth = models.DateField(null=True, blank=True)
-    date_of_death = models.DateField('Died', null=True, blank=True)
-    author_image = models.ImageField(upload_to='images/', null=True, blank=True)
+class Room(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    name = models.CharField(max_length=100)
+    capacity = models.IntegerField(validators=[MinValueValidator(1), MaxValueValidator(100)])
+    available_status = (('a', 'Available'), ('r', 'Reserved'), ('u', 'Unavailable'))
+    status = models.CharField(max_length=1, choices=available_status, default='a', help_text='Room availability')
     class Meta:
-        ordering = ['last_name', 'first_name']
+        ordering = ['name', 'capacity', 'status']
+    def is_available(self, date, time):
+        return not Event.objects.filter(date=date, time=time, room=self).exists()
+    def __str__(self):
+        return self.name
+
+class Event(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    name = models.CharField(max_length=255)
+    max_attendees = models.IntegerField(validators=[MinValueValidator(1), MaxValueValidator(100)])
+    date = models.DateField()
+    time = models.TimeField()
+    planner = models.ForeignKey('EventPlanner', on_delete=models.RESTRICT)
+    genre = models.ManyToManyField('Genre', help_text='Select genres to add to this event')
+    detail = models.TextField(max_length=1000)
+    room = models.ForeignKey('Room', on_delete=models.RESTRICT)
+    class Meta:
+        ordering = ['date', 'time']
+        constraints = [
+            models.UniqueConstraint(fields=['room', 'date', 'time'], name='uniq_room_date_times')
+        ]
+    def end_time(self) -> time:
+        return (timezone.datetime.combine(self.date, self.time) + timedelta(hours=SLOT_DURATION)).time()
+    def clean(self):
+        if not self.time:
+            return
+        if self.time.minute != 0 or self.time.second != 0 or self.time.microsecond != 0:
+            raise ValidationError('Events must start exactly on the hour.')
+        if self.time.hour not in VALID_HOURS:
+            raise ValidationError('Start time must be one of these: 10, 12, 14, 16, 18, or 20.')
+        if self.time.hour + SLOT_DURATION > LAST_END_HOUR:
+            raise ValidationError('Event would end after 10 PM.')
 
     def get_absolute_url(self):
-        """Returns the URL to access a particular author instance."""
-        return reverse('author_detail', args=[str(self.id)])
-
+        return reverse('event detail', args=[str(self.id,)])
     def __str__(self):
-        """String for representing the Model object."""
-        return f'{self.last_name}, {self.first_name}'
+        return f"{self.name} @ {self.room} on {self.date} {self.time.strftime("%H:%M")}"
 
-
-class Book(models.Model):
-    """Model representing a book (but not a specific copy of a book)."""
-    title = models.CharField(max_length=200)
-    # Foreign Key used because book can only have one author, but authors can have multiple books
-    author = models.ForeignKey('Author', on_delete=models.RESTRICT, null=True)
-    summary = models.TextField(max_length=1000, help_text='Enter a brief description of the book')
-    isbn = models.CharField('ISBN', max_length=13, unique=True, help_text='13 Character <a href="https://www.isbn-international.org/content/what-isbn">ISBN number</a>')
-    # ManyToManyField used because genre can contain many books. Books can cover many genres.
-    genre = models.ManyToManyField(Genre, help_text='Select a genre for this book')
-    book_image = models.ImageField(upload_to='images/', null=True, blank=True)
-
-    def __str__(self):
-        """String for representing the Model object."""
-        return self.title
-
+class EventPlanner(models.Model):
+    name = models.CharField(max_length=255)
+    detail = models.TextField(max_length=1000)
+    image = models.ImageField(upload_to='event-planner-images', null=True, blank=True)
     def get_absolute_url(self):
-        """Returns the URL to access a detail record for this book."""
-        return reverse('book_detail', args=[str(self.id)])
-
-
-class BookInstance(models.Model):
-    """Model representing a specific copy of a book (i.e. that can be borrowed from the library)."""
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4,
-                          help_text='Unique ID for this particular book across whole library')
-    book = models.ForeignKey('Book', on_delete=models.RESTRICT, null=True)
-    imprint = models.CharField(max_length=200)
-    due_back = models.DateField(null=True, blank=True)
-
-    LOAN_STATUS = (
-        ('m', 'Maintenance'), ('o', 'On loan'), ('a', 'Available'), ('r', 'Reserved'),
-    )
-
-    status = models.CharField(
-        max_length=1,
-        choices=LOAN_STATUS,
-        blank=True,
-        default='m',
-        help_text='Book availability',
-    )
-    borrower = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True)
-
-    @property
-    def is_overdue(self):
-        """Determines if the book is overdue based on due date and current date."""
-        return bool(self.due_back and date.today() > self.due_back)
-
-    class Meta:
-        ordering = ['due_back']
-
+        return reverse('event planner detail', args=[str(self.id,)])
     def __str__(self):
-        """String for representing the Model object."""
-        return f'{self.id} ({self.book.title})'
+        return self.name
+
+class RSVP(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    event = models.ForeignKey('Event', on_delete=models.CASCADE)
+    planner = models.ForeignKey('EventPlanner', on_delete=models.CASCADE)
+    message = models.TextField(max_length=500)
+    send_date = models.DateField()
+    rsvp_count = models.IntegerField(default=0)
+    class Meta:
+        ordering = ['event']
+    def increase_rsvp(self):
+        self.rsvp_count += 1
+        return self.rsvp_count
+    def __str__(self):
+        return f'{self.id} ({self.event})'
 
 
-# Create your models here.
+
+
+

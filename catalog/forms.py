@@ -1,14 +1,18 @@
-from .models import BookInstance
 from django import forms
+from .models import Event
+from django import forms
+from django.contrib.auth.models import User
+from django.contrib.auth.forms import UserCreationForm
 
-
-class LoanBookForm(forms.ModelForm):
-    """Form for a librarian to loan books."""
-    # Disable the book field to prevent user from entering a book
-    # book_title is for display purposes only - set required=False
-    book_title = forms.CharField(disabled=True, required=False)
+class EventBookingForm(forms.ModelForm):
+    expected_attendees = forms.IntegerField(min_value=1, max_value=100, required=True)
 
     class Meta:
-        # display only the book title and the borrower to the librarian
-        model = BookInstance
-        fields = ('book_title', 'borrower',)
+        model = Event
+        fields = ["name", "genre", "detail", "planner", "expected_attendees", "room"]
+
+    def __init__(self, *args, **kwargs):
+        available_rooms = kwargs.pop("available_rooms", None)
+        super().__init__(*args, **kwargs)
+        if available_rooms is not None:
+            self.fields["room"].queryset = available_rooms

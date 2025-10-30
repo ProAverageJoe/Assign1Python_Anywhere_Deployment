@@ -34,19 +34,15 @@
                 <li class="nav-item">
                     <a class="nav-link" href="{% url 'catalog:eventplanner_list' %} ">View Planner List</a>
                 </li>
-                {% if user.is_authenticated %}
-                    <li class="nav-item">
-                        <a class="nav-link" href="{% url 'catalog:index' %} ">View RSVP List</a>
-                    </li>
-                {% endif %}
+                <li class="nav-item">
+                    <a class="nav-link" href="{% url 'catalog:index' %} ">View RSVP List</a>
+                </li>
                 <li class="nav-item">
                     <a class="nav-link" href="{% url 'catalog:index' %} ">Search Events</a>
                 </li>
-                {%  if user.is_authenticated %}
-                    <li class="nav-item">
-                        <a class="nav-link" href="{% url 'catalog:index' %} ">Create Events</a>
-                    </li>
-                {% endif %}
+                <li class="nav-item">
+                    <a class="nav-link" href="{% url 'catalog:index' %} ">Create Events</a>
+                </li>
             </ul>
             <ul class="nav navbar-nav ml-auto">
         {% if user.is_authenticated %}
@@ -61,18 +57,14 @@
                 <a class="nav-link" href="{% url 'login' %}"><span class="glyphicon glyphicon-log-in"></span>Login</a>
             </li>
             <li>
-                <a class="nav-link" href="{% url 'register' %}"><span class="glyphicon glyphicon-log-in"></span>Sign Up</a>
+                <a class="nav-link" href="{% url 'catalog:signup' %}"><span class="glyphicon glyphicon-log-in"></span>Sign Up</a>
             </li>
         {% endif %}
             </ul>
         </div>
     </div>
 </nav>
-<div class="container">
-    {% if user.is_authenticated %}
-        Welcome, {{ user.first_name }} {{ user.last_name }}
-    {% endif %}
-</div>
+
 <div class="container mt-4">
     {% block content %}
     {% endblock %}
