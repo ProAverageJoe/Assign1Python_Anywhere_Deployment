@@ -145,7 +145,7 @@ class DayView(View):
 
         return render(
             request,
-            "day.html",
+            "catalog/day.html",
             {
                 "date": d,
                 "rooms": rooms,
@@ -201,7 +201,7 @@ def book_event(request):
 
     return render(
         request,
-        "book_event.html",
+        "catalog/event_form.html",
         {"form": form, "room": room, "date": event_date, "time": start_time},
     )
 
@@ -215,3 +215,6 @@ class EventListView( generic.ListView):
     model = Event
 class EventDetailView( generic.DetailView):
     model = Event
+class EventCreate( generic.CreateView):
+    model = Event
+    fields = ['name', 'max_attendees', 'date', 'planner', 'genre', 'room']
