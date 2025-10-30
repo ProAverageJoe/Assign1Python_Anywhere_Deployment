@@ -124,7 +124,7 @@ class DayView(View):
                 e = by_key.get((r.id, h))
 
                 book_url = (
-                    f"{reverse('catalog:book')}"
+                    f"{reverse('catalog:event_create')}"
                     f"?room={r.id}"
                     f"&date={d:%Y-%m-%d}"
                     f"&time={h:02d}:00"

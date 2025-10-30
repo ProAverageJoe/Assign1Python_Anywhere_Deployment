@@ -6,7 +6,7 @@ from django.utils import timezone
 from django.core.exceptions import ValidationError
 from datetime import time, timedelta
 from django.db.models import Q
-from django.contrib.auth.models import User
+from django.contrib.auth.models import User, Permission
 
 
 VALID_HOURS = (10, 12, 14, 16, 18, 20)
