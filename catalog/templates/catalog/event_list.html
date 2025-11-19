@@ -1,19 +1,84 @@
 {% extends "catalog/base.html" %}
 
 {% block content %}
-    <h1>Event List</h1>
+<h1>Event List</h1>
 
-    {% if event_list %}
-        <ul>
+{% if event_list %}
+    <table class="table table-bordered white-table">
+        <thead>
+            <tr class="table-secondary">
+                <th>Event</th>
+                <th>Planner</th>
+                <th>Edit</th>
+                <th>Delete</th>
+                <th>RSVP</th>
+            </tr>
+        </thead>
+        <tbody>
             {% for event in event_list %}
-                <li>
-                    <a href="{% url 'catalog:event_detail' event.pk %}">{{ event.name }}</a>
-                    (Planner: {{ event.planner}})
-                </li>
+                {% if event.show_event %}
+                    <tr>
+                        <td>
+                            <a href="{% url 'catalog:event_detail' event.pk %}">
+                                {{ event.name }}
+                            </a>
+                            {% if not event.approved %}
+                                <span class="text-muted small">(pending)</span>
+                            {% endif %}
+                            <br>
+                            <small>
+                                {{ event.date }} at {{ event.time }}<br>
+                                Attendees: {{ event.rsvp_count }} / {{ event.max_attendees }}
+                            </small>
+                        </td>
+
+                        <td>{{ event.planner }}</td>
+                        {% if event.can_manage %}
+                            <td>
+                                <a href="{% url 'catalog:event_update' event.pk %}?next={{ request.path }}"
+                                   class="btn btn-sm btn-primary">
+                                    Edit
+                                </a>
+                            </td>
+                            <td>
+                                <a href="{% url 'catalog:event_delete' event.pk %}?next={{ request.path }}"
+                                   class="btn btn-sm btn-danger"
+                                   onclick="return confirm('Are you sure you want to delete this event?')">
+                                    Delete
+                                </a>
+                            </td>
+                        {% else %}
+                            <td>You don't have permissions <br> to perform this function.</td>
+                            <td>You don't have permissions <br> to perform this function.</td>
+                        {% endif %}
+                        <td>
+                            {% if user.is_authenticated %}
+                                {% if event.user_rsvp %}
+                                    <span class="text-success">
+                                        <strong>You are {{ event.user_rsvp.get_status_display }}</strong>
+                                    </span>
+                                {% else %}
+                                    {% if event.rsvp_count >= event.max_attendees %}
+                                        <p><strong>Event full</strong></p>
+                                    {% else %}
+                                        <a href="{% url 'catalog:rsvp_event' event.id 'y' %}?next={{ request.path }}"
+                                           class="btn btn-success">
+                                            RSVP
+                                        </a>
+                                    {% endif %}
+                                {% endif %}
+                            {% else %}
+                                <a href="{% url 'login' %}?next={{ request.path }}">Log in to RSVP</a>
+                            {% endif %}
+                        </td>
+                    </tr>
+                {% endif %}
             {% endfor %}
-        </ul>
-    {% else %}
-        <p>There are no Events Scheduled.</p>
-    {% endif %}
-    <a href="{% url 'catalog:index' %}" class="btn btn-outline-secondary">Back</a>
+        </tbody>
+    </table>
+{% else %}
+    <p>There are no Events Scheduled.</p>
+{% endif %}
+
+<a href="{% url 'catalog:index' %}" class="btn back-btn">Back</a>
 {% endblock %}

@@ -1,3 +1,4 @@
+from django.conf import settings
 from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
 from django.urls import reverse
@@ -6,7 +7,7 @@ from django.utils import timezone
 from django.core.exceptions import ValidationError
 from datetime import time, timedelta
 from django.db.models import Q
-from django.contrib.auth.models import User, Permission
+from django.contrib.auth.models import User
 
 
 VALID_HOURS = (10, 12, 14, 16, 18, 20)
@@ -27,7 +28,7 @@ class Room(models.Model):
     class Meta:
         ordering = ['name', 'capacity', 'status']
     def is_available(self, date, time):
-        return not Event.objects.filter(date=date, time=time, room=self).exists()
+        return not Event.objects.filter(date=date, time=time, room=self, approved=True,).exists()
     def __str__(self):
         return self.name
 
@@ -37,15 +38,22 @@ class Event(models.Model):
     max_attendees = models.IntegerField(validators=[MinValueValidator(1), MaxValueValidator(100)])
     date = models.DateField()
     time = models.TimeField()
-    planner = models.ForeignKey('EventPlanner', on_delete=models.RESTRICT)
+    planner = models.ForeignKey('EventPlanner', on_delete=models.CASCADE)
     genre = models.ManyToManyField('Genre', help_text='Select genres to add to this event')
     detail = models.TextField(max_length=1000)
     room = models.ForeignKey('Room', on_delete=models.RESTRICT)
+    approved = models.BooleanField(default=False)
+    rsvp_count = models.PositiveIntegerField(default=0)
+
     class Meta:
         ordering = ['date', 'time']
         constraints = [
-            models.UniqueConstraint(fields=['room', 'date', 'time'], name='uniq_room_date_times')
-        ]
+            models.UniqueConstraint(
+                fields=['room', 'date', 'time'],
+                condition=Q(approved=True),
+                name='uniq_room_date_times'
+                )
+            ]
     def end_time(self) -> time:
         return (timezone.datetime.combine(self.date, self.time) + timedelta(hours=SLOT_DURATION)).time()
     def clean(self):
@@ -58,36 +66,51 @@ class Event(models.Model):
         if self.time.hour + SLOT_DURATION > LAST_END_HOUR:
             raise ValidationError('Event would end after 10 PM.')
 
-    def get_absolute_url(self):
-        return reverse('event detail', args=[str(self.id,)])
-    def __str__(self):
-        return f"{self.name} @ {self.room} on {self.date} {self.time.strftime('%H:%M')}"
+    def save(self, *args, **kwargs):
+        approving_now = False
+        is_creating = self._state.adding
+
+        if not is_creating:
+            previous = Event.objects.get(pk=self.pk)
+            if not previous.approved and self.approved:
+                approving_now = True
+        else:
+            if self.approved:
+                approving_now = True
+
+        super().save(*args, **kwargs)
+        if approving_now:
+            Event.objects.filter(
+                room=self.room,
+                date=self.date,
+                time=self.time,
+                approved=False,
+            ).exclude(pk=self.pk).delete()
 
 class EventPlanner(models.Model):
+    user = models.OneToOneField(User, on_delete=models.CASCADE, null=True, blank=True)
     name = models.CharField(max_length=255)
     detail = models.TextField(max_length=1000)
     image = models.ImageField(upload_to='event-planner-images', null=True, blank=True)
     def get_absolute_url(self):
-        return reverse('event planner detail', args=[str(self.id,)])
+        return reverse('eventplanner_detail', args=[str(self.id,)])
     def __str__(self):
         return self.name
 
 class RSVP(models.Model):
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    event = models.ForeignKey('Event', on_delete=models.CASCADE)
-    planner = models.ForeignKey('EventPlanner', on_delete=models.CASCADE)
-    message = models.TextField(max_length=500)
-    send_date = models.DateField()
-    rsvp_count = models.IntegerField(default=0)
+    RSVP_STATUS = (('y', 'Attending'), ('n', 'Not attending'))
+
+    id = models.AutoField(primary_key=True)  # ← let Django use an integer PK
+    event = models.ForeignKey('Event', on_delete=models.CASCADE, related_name='rsvps')
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.RESTRICT, null=True, related_name='rsvps')
+    status = models.CharField(max_length=1, choices=RSVP_STATUS, default='y')
+
     class Meta:
         ordering = ['event']
-    def increase_rsvp(self):
-        self.rsvp_count += 1
-        return self.rsvp_count
+        unique_together = ('event', 'user')  # one RSVP per user per event
+
     def __str__(self):
-        return f'{self.id} ({self.event})'
-
-
+        return f'{self.user} → {self.event} ({self.get_status_display()})'
 
 
 
