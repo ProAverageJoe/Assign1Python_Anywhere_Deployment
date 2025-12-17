@@ -93,7 +93,7 @@ class EventPlanner(models.Model):
     detail = models.TextField(max_length=1000)
     image = models.ImageField(upload_to='event-planner-images', null=True, blank=True)
     def get_absolute_url(self):
-        return reverse('eventplanner_detail', args=[str(self.id,)])
+        return reverse('eventplanner_detail', args=[str(self.id)])
     def __str__(self):
         return self.name
 
@@ -112,5 +112,28 @@ class RSVP(models.Model):
     def __str__(self):
         return f'{self.user} → {self.event} ({self.get_status_display()})'
 
+class BlockedDate(models.Model):
+    date = models.DateField(unique=True)
+    reason = models.CharField(max_length=200, blank=True, null=True)
 
+    class Meta:
+        ordering = ["date"]
+        verbose_name = "Blocked Date"
+        verbose_name_plural = "Blocked Dates"
+    def __str__(self):
+        return f"{self.date} ({self.reason}"  if self.reason else str(self.date)
 
+class EventNotification(models.Model):
+    event = models.ForeignKey(Event, on_delete=models.CASCADE, related_name='notifications')
+    planner = models.ForeignKey('EventPlanner', on_delete=models.CASCADE)
+    subject = models.CharField(max_length=255)
+    body = models.TextField()
+    scheduled_for = models.DateTimeField()
+    created_at = models.DateTimeField(auto_now_add=True)
+    sent = models.BooleanField(default=False)
+
+    class Meta:
+        ordering = ['scheduled_for']
+
+    def __str__(self):
+        return f"Notification for {self.event.name} at {self.scheduled_for}"

@@ -1,24 +1,27 @@
 from django.shortcuts import render, get_object_or_404, redirect
 import calendar
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from django.urls import reverse
 from django.utils import timezone
-from .forms import EventBookingForm, EventPlannerForm
+from .forms import EventBookingForm, EventPlannerForm, BlockedDateForm, BulkBlockDatesForm, EventNotificationForm,RoomForm
 from django.views.generic.edit import UpdateView
 from django.contrib.auth.models import Group, User
 from django.http import HttpResponseBadRequest, HttpResponseForbidden, HttpResponseRedirect
-from .models import Event, EventPlanner, Room, VALID_HOURS, RSVP
+from .models import Event, EventPlanner, Room, VALID_HOURS, RSVP, BlockedDate, EventNotification, Q
 from django.views import View, generic
 from django.db.models import Count
 from django.contrib.auth.decorators import user_passes_test, login_required
 from django.contrib import messages
 from django.contrib.auth.mixins import LoginRequiredMixin, UserPassesTestMixin
+from django.core.mail import send_mail
+from django.conf import settings
 
 
 SLOTS_PER_DAY = 6
 
 # Create your views here.
-
+def staff_required(view_func):
+    return user_passes_test(lambda u: u.is_staff)(view_func)
 def _month_grid(year: int, month: int, capacity_aware: bool = True):
 
     cal = calendar.Calendar(firstweekday=6)
@@ -41,6 +44,11 @@ def _month_grid(year: int, month: int, capacity_aware: bool = True):
     )
 
     by_day = {row['date']: row['count'] for row in counts_qs}
+    blocked = set(
+        BlockedDate.objects
+        .filter(date__range=(visible_days_start, visible_days_end))
+        .values_list('date', flat=True)
+    )
 
     rooms_total = Room.objects.filter(status='a').count() or 1
     slots_total = rooms_total * 6
@@ -66,6 +74,7 @@ def _month_grid(year: int, month: int, capacity_aware: bool = True):
                 "date": d,
                 "in_month": (d.month == month),
                 "count": count,
+                "blocked": d in blocked,
                 "cls": load_class(count),
                 "url": reverse("catalog:calendar-day", args=[d.year, d.month, d.day]),
             })
@@ -118,6 +127,7 @@ class DayView(View):
     def get(self, request, year, month, day):
         d = date(int(year), int(month), int(day))
         rooms = list(Room.objects.order_by('name'))
+        is_blocked = BlockedDate.objects.filter(date=d).exists()
 
         events = (
             Event.objects
@@ -150,6 +160,7 @@ class DayView(View):
                     "booked": bool(evs),
                     "has_approved": has_approved,
                     "book_url": book_url,
+                    "is_room_available": (r.status == 'a'),
                 })
 
             rows.append({
@@ -163,6 +174,8 @@ class DayView(View):
                 or request.user.groups.filter(name="EventPlanner").exists()
             )
         )
+        if is_blocked:
+            can_book = False
 
         return render(
             request,
@@ -172,6 +185,7 @@ class DayView(View):
                 "rooms": rooms,
                 "rows": rows,
                 "can_book": can_book,
+                "is_blocked": is_blocked,
             }
         )
 
@@ -209,6 +223,9 @@ def book_event(request):
     room = get_object_or_404(Room, id=room_id)
     event_date = datetime.strptime(date_str, "%Y-%m-%d").date()
     start_time = datetime.strptime(time_str, "%H:%M").time()
+    if BlockedDate.objects.filter(date=event_date).exists():
+        messages.error(request, "This date is unavailable for booking.")
+        return redirect("catalog:index")
 
     if request.method == "POST":
         form = EventBookingForm(request.POST)
@@ -273,9 +290,23 @@ def book_event(request):
         },
     )
 
-
 class EventPlannerListView( generic.ListView):
     model = EventPlanner
+    template_name = "catalog/eventplanner_list.html"
+
+    def get_queryset(self):
+        qs = super().get_queryset().select_related("user")
+        query = self.request.GET.get("q", "")
+
+        if query:
+            qs = qs.filter(
+                Q(name__icontains=query) |
+                Q(user__first_name__icontains=query) |
+                Q(user__last_name__icontains=query)
+            )
+
+        return qs
+
 class EventPlannerDetailView( generic.DetailView):
     model = EventPlanner
 
@@ -301,20 +332,28 @@ def EventPlannerDelete(request, pk):
     except:
         messages.error(request, (eventplanner.name + " cannot be deleted. Events exist for this planner."))
     return redirect('catalog:eventplanner_list')
+
 class EventListView( generic.ListView):
     model = Event
     template_name = "catalog/event_list.html"
+
     def get_queryset(self):
         qs = super().get_queryset().select_related("planner")
         user = self.request.user
+        query = self.request.GET.get("q", "")
+
+        if query:
+            qs = qs.filter(name__icontains=query)
+
         for e in qs:
-            is_owner = bool(e.planner and getattr(e.planner, 'user', None) == user)
-            can_manage= user.is_superuser or is_owner
-            show_event = e.approved or can_manage
+            is_owner = e.planner and e.planner.user == user
+            can_manage = user.is_superuser or is_owner
             e.is_owner = is_owner
             e.can_manage = can_manage
-            e.show_event = show_event
+            e.show_event = e.approved or can_manage
+
         return qs
+
 class EventDetailView( generic.DetailView):
     model = Event
 
@@ -485,6 +524,28 @@ class UserRSVPListView(LoginRequiredMixin, generic.ListView):
             .order_by('event__date', 'event__time')
         )
 
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        user = self.request.user
+
+        # Try to find an EventPlanner profile for this user
+        try:
+            planner = EventPlanner.objects.get(user=user)
+        except EventPlanner.DoesNotExist:
+            planner = None
+
+        if planner:
+            planned_events = (
+                Event.objects
+                .filter(planner=planner)  # or .filter(planner__user=user)
+                .order_by('date', 'time')
+            )
+        else:
+            planned_events = Event.objects.none()
+
+        context['planned_events'] = planned_events
+        return context
+
 class AdminRequiredMixin(UserPassesTestMixin):
     def test_func(self):
         return self.request.user.is_superuser
@@ -494,21 +555,35 @@ class UserListView(LoginRequiredMixin, AdminRequiredMixin, generic.TemplateView)
 
     def get_context_data(self, **kwargs):
         context = super().get_context_data(**kwargs)
-        admins = User.objects.filter(is_superuser=True).order_by("username")
-        planners = (
-            EventPlanner.objects
-            .select_related("user")
-            .order_by("user__username")
-        )
-        goers = (
-            User.objects
-            .filter(is_superuser=False)
-            .exclude(eventplanner__isnull=False)
-            .order_by("username")
-        )
-        context["admins"] = admins
-        context["planners"] = planners
-        context["goers"] = goers
+        query = self.request.GET.get("q", "").strip()
+        admins_qs = User.objects.filter(is_superuser=True)
+        planners_qs = EventPlanner.objects.select_related("user")
+        goers_qs = User.objects.filter(is_superuser=False).exclude(eventplanner__isnull=False)
+
+        if query:
+            admins_qs = admins_qs.filter(
+                Q(username__icontains=query) |
+                Q(first_name__icontains=query) |
+                Q(last_name__icontains=query)
+            )
+
+            planners_qs = planners_qs.filter(
+                Q(user__username__icontains=query) |
+                Q(user__first_name__icontains=query) |
+                Q(user__last_name__icontains=query)
+            )
+
+            goers_qs = goers_qs.filter(
+                Q(username__icontains=query) |
+                Q(first_name__icontains=query) |
+                Q(last_name__icontains=query)
+            )
+
+        context["admins"] = admins_qs.order_by("username")
+        context["planners"] = planners_qs.order_by("user__username")
+        context["goers"] = goers_qs.order_by("username")
+        context["query"] = query
+
         return context
 
 class UserUpdateView(LoginRequiredMixin, AdminRequiredMixin, UpdateView):
@@ -536,3 +611,210 @@ def user_delete(request, pk):
         messages.error(request, f"{name} could not be deleted.")
 
     return redirect('catalog:user_list')
+@login_required
+@staff_required
+def manage_dates(request):
+    single_form = BlockedDateForm(prefix="single")
+    bulk_form = BulkBlockDatesForm(prefix="bulk")
+
+    if request.method == "POST":
+        if "single-submit" in request.POST:
+            single_form = BlockedDateForm(request.POST, prefix="single")
+            if single_form.is_valid():
+                obj, created = BlockedDate.objects.update_or_create(
+                    date=single_form.cleaned_data["date"],
+                    defaults={"reason": single_form.cleaned_data.get("reason", "")},
+                )
+                if created:
+                    messages.success(request, f"{obj.date} has been blocked.")
+                else:
+                    messages.success(request, f"{obj.date} has been updated.")
+                return redirect("catalog:manage_dates")
+
+        elif "bulk-submit" in request.POST:
+            bulk_form = BulkBlockDatesForm(request.POST, prefix="bulk")
+            if bulk_form.is_valid():
+                start = bulk_form.cleaned_data["start_date"]
+                end = bulk_form.cleaned_data["end_date"]
+                reason = bulk_form.cleaned_data.get("reason", "")
+
+                current = start
+                created_count = 0
+                while current <= end:
+                    _, created = BlockedDate.objects.get_or_create(
+                        date=current,
+                        defaults={"reason": reason},
+                    )
+                    if created:
+                        created_count += 1
+                    current += timedelta(days=1)
+
+                messages.success(
+                    request,
+                    f"Blocked {created_count} date(s) from {start} to {end}."
+                )
+                return redirect("catalog:manage_dates")
+
+    today = date.today()
+    blocked_dates = BlockedDate.objects.filter(date__gte=today).order_by("date")
+
+    context = {
+        "single_form": single_form,
+        "bulk_form": bulk_form,
+        "blocked_dates": blocked_dates,
+    }
+    return render(request, "catalog/manage_dates.html", context)
+
+@login_required
+@staff_required
+def unblock_date(request, pk):
+    blocked = get_object_or_404(BlockedDate, pk=pk)
+    blocked.delete()
+    messages.success(request, f"You have unblocked {blocked.date}.")
+    return redirect("catalog:manage_dates")
+
+@login_required
+def create_event_notification(request, event_id):
+    event = get_object_or_404(Event, id=event_id)
+
+    # Ensure the logged-in user is the planner for this event
+    try:
+        planner = EventPlanner.objects.get(user=request.user)
+    except EventPlanner.DoesNotExist:
+        messages.error(request, "You must be an event planner to create notifications.")
+        return redirect('catalog:event_detail', pk=event.id)
+
+    if event.planner != planner:
+        messages.error(request, "You are not the planner for this event.")
+        return redirect('catalog:event_detail', pk=event.id)
+
+    if request.method == 'POST':
+        form = EventNotificationForm(request.POST)
+        if form.is_valid():
+            notification = form.save(commit=False)
+            notification.event = event
+            notification.planner = planner
+            if notification.scheduled_for <= timezone.now():
+                messages.error(request, "Scheduled time must be in the future.")
+            else:
+                notification.save()
+                messages.success(request, "Notification scheduled successfully.")
+                return redirect('catalog:event_detail', pk=event.id)
+    else:
+        form = EventNotificationForm()
+
+    return render(
+        request,
+        'catalog/event_notification_form.html',
+        {'form': form, 'event': event}
+    )
+
+@login_required
+def send_event_notification_now(request, event_id):
+    event = get_object_or_404(Event, id=event_id)
+
+    try:
+        planner = EventPlanner.objects.get(user=request.user)
+    except EventPlanner.DoesNotExist:
+        messages.error(request, "You must be an event planner to send notifications.")
+        return redirect('catalog:my_rsvps')
+
+    if event.planner != planner:
+        messages.error(request, "You are not the planner for this event.")
+        return redirect('catalog:my_rsvps')
+
+    notification = (
+        EventNotification.objects
+        .filter(event=event, sent=False)
+        .order_by('scheduled_for')
+        .first()
+    )
+
+    if not notification:
+        messages.error(request, "There is no pending notification to send for this event.")
+        return redirect('catalog:my_rsvps')
+
+    # Get all attendees (RSVP 'y')
+    rsvps = RSVP.objects.filter(event=event, status='y').select_related('user')
+    recipients = [r.user.email for r in rsvps if r.user and r.user.email]
+
+    if not recipients:
+        messages.error(request, "No attendees with email addresses to send to.")
+        return redirect('catalog:my_rsvps')
+
+        # Send the email
+    send_mail(
+        subject=notification.subject,
+        message=notification.body,
+        from_email=settings.EMAIL_HOST_USER,
+        recipient_list=recipients,
+        fail_silently=False,
+        )
+
+    notification.sent = True
+    notification.scheduled_for = timezone.now()
+    notification.save()
+
+    messages.success(
+        request,
+        f"Notification email sent to {len(recipients)} attendee(s) for '{event.name}'."
+        )
+
+    return redirect('catalog:my_rsvps')
+
+@login_required
+@staff_required
+def manage_rooms(request):
+    rooms = Room.objects.order_by("name", "capacity")
+    return render(request, "catalog/manage_rooms.html", {"rooms": rooms})
+
+@login_required
+@staff_required
+def room_create(request):
+    if request.method == "POST":
+        form = RoomForm(request.POST)
+        if form.is_valid():
+            room = form.save()
+            messages.success(request, f"Room '{room.name}' created.")
+            return redirect("catalog:manage_rooms")
+    else:
+        form = RoomForm()
+
+    return render(request, "catalog/room_form.html", {"form": form, "mode": "create"})
+
+@login_required
+@staff_required
+def room_edit(request, pk):
+    room = get_object_or_404(Room, pk=pk)
+
+    if request.method == "POST":
+        form = RoomForm(request.POST, instance=room)
+        if form.is_valid():
+            form.save()
+            messages.success(request, f"Room '{room.name}' updated.")
+            return redirect("catalog:manage_rooms")
+    else:
+        form = RoomForm(instance=room)
+
+    return render(request, "catalog/room_form.html", {
+        "form": form,
+        "mode": "edit",
+        "room": room
+    })
+
+@login_required
+@staff_required
+def room_set_status(request, pk, status):
+    room = get_object_or_404(Room, pk=pk)
+
+    valid_statuses = {"a", "r", "u"}
+    if status not in valid_statuses:
+        messages.error(request, "Invalid room status.")
+        return redirect("catalog:manage_rooms")
+
+    room.status = status
+    room.save()
+
+    status_label = dict(Room.available_status)[status]
+    messages.success(request, f"Room '{room.name}' set to {status_label}.")
+    return redirect("catalog:manage_rooms")

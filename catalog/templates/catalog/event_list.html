@@ -2,11 +2,22 @@
 
 {% block content %}
 <h1>Event List</h1>
-
+    <form class="d-flex align-items-center gap-2 my-3" method="GET" action="{% url 'catalog:event_list' %}">
+    <div class="input-group shadow-sm">
+        <input
+            type="search"
+            name="q"
+            class="form-control"
+            placeholder="Search events ..."
+            aria-label="Search events ..."
+        >
+        <button class="btn btn-primary" type="submit">Search</button>
+    </div>
+    </form>
 {% if event_list %}
-    <table class="table table-bordered white-table">
+    <table class="table borderless">
         <thead>
-            <tr class="table-secondary">
+            <tr class="table borderless">
                 <th>Event</th>
                 <th>Planner</th>
                 <th>Edit</th>
@@ -23,7 +34,7 @@
                                 {{ event.name }}
                             </a>
                             {% if not event.approved %}
-                                <span class="text-muted small">(pending)</span>
+                                <span class="small">(pending)</span>
                             {% endif %}
                             <br>
                             <small>
@@ -48,8 +59,8 @@
                                 </a>
                             </td>
                         {% else %}
-                            <td>You don't have permissions <br> to perform this function.</td>
-                            <td>You don't have permissions <br> to perform this function.</td>
+                            <td></td>
+                            <td></td>
                         {% endif %}
                         <td>
                             {% if user.is_authenticated %}
