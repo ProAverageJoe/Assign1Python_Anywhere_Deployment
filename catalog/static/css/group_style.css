@@ -40,10 +40,5 @@ body {
     background-repeat: no-repeat;
     background-attachment: fixed;
     background-size: cover;
-    background-image: url("../img/page_02.png");
 
-}
-
-body.signup-page {
-    background-image: url("static/img/page_01.png");
 }
